@@ -3,3 +3,9 @@
 ################################################################################
 
 /.idea/.idea.AsyncNet
+/.vs/AsyncNet
+/AsyncNet/Properties/PublishProfiles
+/AsyncNet/obj
+/AsyncNet/bin
+*.TMP
+*.user

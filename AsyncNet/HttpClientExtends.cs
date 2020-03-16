@@ -46,11 +46,11 @@ namespace AsyncNet
             {
                 using (var request = new HttpRequestMessage(HttpMethod.Head, url))
                 {
-                    using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseContentRead))
+                    using (var response = await client.SendAsync(request))
                     {
                         if (response.IsSuccessStatusCode)
                         {
-                            return (int) response.Content.Headers.ContentLength.GetValueOrDefault(0);
+                            return (int)response.Content.Headers.ContentLength.GetValueOrDefault(0);
                         }
 
                         return -1;
@@ -64,51 +64,54 @@ namespace AsyncNet
         }
 
         public static async Task<bool> GetRangeContent(this HttpClient client, string url, Stream output,
-            int start, int end, CancellationToken token)
+            int? start, int? end, CancellationToken token)
         {
             try
             {
-                if (start > end || end <= 0)
-                {
-                    return false;
-                }
-
+                int? length = null;
                 using (var request = new HttpRequestMessage(HttpMethod.Get, url))
                 {
-                    request.Headers.Add("Range", start <= 0 ? $"bytes=0-{end}" : $"bytes={start}-{end}");
+                    if (start.HasValue && end.HasValue)
+                    {
+                        request.Headers.Add("Range", $"bytes={start}-{end}");
+                        length = end - start + 1;
+                    }
+                    else if (start.HasValue)
+                    {
+                        request.Headers.Add("Range", $"bytes={start}-");
+                    }
+                    else if (end.HasValue)
+                    {
+                        request.Headers.Add("Range", $"bytes=0-{end}");
+                        length = end + 1;
+                    }
 
-                    using (var response =
-                        await client.SendAsync(request, HttpCompletionOption.ResponseContentRead, token))
+                    using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token))
                     {
                         if (!response.IsSuccessStatusCode)
                         {
                             Console.WriteLine(response.ReasonPhrase);
-                            return false;
+                            return response.StatusCode == System.Net.HttpStatusCode.RequestedRangeNotSatisfiable;
                         }
-
                         using (var input = await response.Content.ReadAsStreamAsync())
                         {
-                            var length = end - start;
-                            var buffer = ArrayPool<byte>.Shared.Rent(Math.Min(length, 32 * 1024));
+                            var buffer = ArrayPool<byte>.Shared.Rent(16 * 1024);
                             try
                             {
-                                while (length > 0)
+                                while ((!length.HasValue) || length.Value > 0)
                                 {
-                                    using (var singleToken = new CancellationTokenSource(10000))
+                                    using (var read = CancellationTokenSource.CreateLinkedTokenSource(token))
                                     {
-                                        using (var readToken = token == CancellationToken.None
-                                            ? singleToken
-                                            : CancellationTokenSource.CreateLinkedTokenSource(token,
-                                                singleToken.Token))
+                                        read.CancelAfter(15000);
+                                        var num = await input.ReadAsync(buffer, 0, buffer.Length, read.Token);
+                                        if (num <= 0)
                                         {
-                                            var num = await input.ReadAsync(buffer, 0, buffer.Length,
-                                                readToken.Token);
-                                            if (num <= 0)
-                                            {
-                                                break;
-                                            }
+                                            break;
+                                        }
 
-                                            await output.WriteAsync(buffer, 0, num);
+                                        await output.WriteAsync(buffer, 0, num);
+                                        if (length.HasValue)
+                                        {
                                             length -= num;
                                         }
                                     }
