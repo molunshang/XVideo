@@ -1,4 +1,5 @@
-﻿using System;
+﻿using NLog;
+using System;
 using System.Buffers;
 using System.IO;
 using System.Net.Http;
@@ -10,6 +11,7 @@ namespace AsyncNet
 {
     public static class HttpClientExtends
     {
+        private static readonly Logger logger = LogManager.GetCurrentClassLogger();
         public static async Task<string> GetStringOrNullAsync(this HttpClient client, string url,
             Encoding encoding = null)
         {
@@ -102,7 +104,7 @@ namespace AsyncNet
                                 {
                                     using (var read = CancellationTokenSource.CreateLinkedTokenSource(token))
                                     {
-                                        read.CancelAfter(15000);
+                                        read.CancelAfter(30000);
                                         var num = await input.ReadAsync(buffer, 0, buffer.Length, read.Token);
                                         if (num <= 0)
                                         {
@@ -127,8 +129,12 @@ namespace AsyncNet
                     }
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                if (ex is TaskCanceledException)
+                {
+                    logger.Error("stream read timeout.url={0}", url);
+                }
                 return false;
             }
         }

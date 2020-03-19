@@ -26,6 +26,9 @@ namespace AsyncNet
         [Option('r', "record", Required = false, Default = @"E:\test\visited.txt",
             HelpText = "visited url record file path.")]
         public string VisitedUrlPath { get; set; }
+        [Option('b', "black", Required = false, Default = @"E:\test\blacks.txt",
+            HelpText = "the black urls file path.")]
+        public string BlackUrlPath { get; set; }
 
         [Option('d', "dest", Required = false, Default = @"E:\test\video", HelpText = "video save path.")]
         public string VideoStorePath { get; set; }
@@ -53,6 +56,7 @@ namespace AsyncNet
         }
 
         private static string _visitePath = @"E:\test\visited.txt";
+        private static string _blackPath = @"E:\test\blacks.txt";
         private static string _startPath = @"E:\test\starts.txt";
         private static string _startItemPath = @"E:\test\items.txt";
         private static string _tempPath = @"E:\test\";
@@ -81,6 +85,13 @@ namespace AsyncNet
             var visitedPage = new HashSet<string>();
             Queue<string> starts = new Queue<string>(), urls = new Queue<string>();
             var pages = new Stack<string>();
+            if (File.Exists(_blackPath))
+            {
+                foreach (var url in File.ReadLines(_blackPath))
+                {
+                    visitedPage.Add(url);
+                }
+            }
             if (File.Exists(_startPath))
             {
                 var links = new List<string>();
@@ -89,7 +100,7 @@ namespace AsyncNet
                 {
                     starts.Enqueue(url + "/videos/best/0");
                     starts.Enqueue(url + "/favorites/0");
-                    if (filter.Add(url))
+                    if (filter.Add(url) && !visitedPage.Contains(url))
                     {
                         links.Add(url);
                     }
@@ -106,15 +117,17 @@ namespace AsyncNet
             {
                 urls.Enqueue($"https://www.xvideos.com/video{tempId.Key}/_");
             }
+            var startItemIds = new HashSet<uint>();
             if (File.Exists(_startItemPath))
             {
-                foreach (var url in File.ReadLines(_startItemPath).Distinct())
+                foreach (var url in File.ReadLines(_startItemPath).Distinct().Where(s => { var id = Convert(s); startItemIds.Add(id); return !visitedUrls.Contains(id); }))
                 {
                     urls.Enqueue(url);
                 }
+                File.WriteAllLines(_startItemPath, urls);
             }
 
-            var client = new HttpClient(new SocketsHttpHandler()
+            var client = new HttpResponseTimeoutClient(new SocketsHttpHandler()
             {
                 ConnectTimeout = TimeSpan.FromSeconds(15),
                 AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
@@ -122,6 +135,7 @@ namespace AsyncNet
             })
             {
                 Timeout = TimeSpan.FromMinutes(10),
+                ResponseTimeout = TimeSpan.FromSeconds(15),
                 DefaultRequestHeaders =
                 {
                     {
@@ -137,6 +151,7 @@ namespace AsyncNet
                 }
             };
             var downPartQueue = new ConcurrentQueue<int>();
+            var parts = new List<string>();
             while (true)
             {
                 var size = urls.Count;
@@ -153,6 +168,7 @@ namespace AsyncNet
                         }
                         deep = true;
                         size = urls.Count;
+                        await File.AppendAllLinesAsync(_startItemPath, urls);
                     }
                     try
                     {
@@ -182,7 +198,7 @@ namespace AsyncNet
                                 return link;
                             })).Distinct();
                         File.AppendAllLines(_startPath, models);
-                        if (!deep)
+                        if (!startItemIds.Contains(videoId) && !deep)
                         {
                             var relates = Regex.Matches(html, @"""(\\/video\d+?\\/.+?)""", RegexOptions.Compiled).Where(m => m.Success);
                             foreach (var r in relates)
@@ -235,7 +251,7 @@ namespace AsyncNet
                         }
 
                         reader = new StringReader(html);
-                        var parts = new List<string>();
+                        parts.Clear();
                         while (reader.Peek() > -1)
                         {
                             var line = reader.ReadLine();
@@ -286,13 +302,20 @@ namespace AsyncNet
                                           {
                                               parts[local] = partFile;
                                               Console.WriteLine("download {0} success", Interlocked.Increment(ref successSize));
-                                              await Task.Delay(500);
+                                              await Task.Delay(100);
                                               continue;
                                           }
                                           var flag = true;
                                           using (var cancel = CancellationTokenSource.CreateLinkedTokenSource(commonCts.Token))
                                           {
-                                              using (cancel.Token.Register(commonCts.Cancel))
+                                              using (cancel.Token.Register(() =>
+                                              {
+                                                  if (downPartQueue.Count <= _parallelSize)
+                                                  {
+                                                      return;
+                                                  }
+                                                  commonCts.Cancel();
+                                              }))
                                               {
                                                   cancel.CancelAfter(_time);
                                                   if (length <= 32 * 1024)
@@ -320,16 +343,14 @@ namespace AsyncNet
                                                                   if (res)
                                                                   {
                                                                       partFlags[pIndex] = true;
-                                                                      break;
+                                                                      return;
                                                                   }
                                                                   if (cancel.IsCancellationRequested)
                                                                   {
                                                                       flag = false;
+                                                                      return;
                                                                   }
-                                                                  else
-                                                                  {
-                                                                      await Task.Delay(100);
-                                                                  }
+                                                                  await Task.Delay(100);
                                                               }
                                                           }));
                                                       }
@@ -354,13 +375,17 @@ namespace AsyncNet
                                           if (flag)
                                           {
                                               parts[local] = partFile;
+                                              Console.WriteLine("download {0} success", Interlocked.Increment(ref successSize));
+                                          }
+                                          else if (downPartQueue.Count > _parallelSize)
+                                          {
+                                              success = false;
+                                              Console.WriteLine("download {0} fail", part);
                                           }
                                           else
                                           {
-                                              success = false;
+                                              downPartQueue.Enqueue(local);
                                           }
-                                          Console.WriteLine("download {0} {1}", Interlocked.Increment(ref successSize), flag ? "success" : "fail");
-
                                       }
                                   }
                                   foreach (var item in parallelStreams)

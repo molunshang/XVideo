@@ -9,3 +9,5 @@
 /AsyncNet/bin
 *.TMP
 *.user
+/Stock/bin/Debug/netcoreapp3.1
+/Stock/obj
