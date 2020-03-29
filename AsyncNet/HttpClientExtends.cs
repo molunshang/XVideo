@@ -12,33 +12,38 @@ namespace AsyncNet
     public static class HttpClientExtends
     {
         private static readonly Logger logger = LogManager.GetCurrentClassLogger();
-        public static async Task<string> GetStringOrNullAsync(this HttpClient client, string url,
+        public static async Task<(bool, string)> GetStringOrNullAsync(this HttpClient client, string url,
             Encoding encoding = null)
         {
             try
             {
                 using (var request = new HttpRequestMessage(HttpMethod.Get, url))
                 {
-                    using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseContentRead))
+                    using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseContentRead).ConfigureAwait(false))
                     {
                         if (!response.IsSuccessStatusCode || response.Content == null)
                         {
-                            return string.Empty;
+                            return (true, string.Empty);
                         }
 
+                        string res;
                         if (encoding == null)
                         {
-                            return await response.Content.ReadAsStringAsync();
+                            res = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                         }
+                        else
+                        {
+                            var bytes = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                            res = encoding.GetString(bytes);
+                        }
+                        return (true, res);
 
-                        var bytes = await response.Content.ReadAsByteArrayAsync();
-                        return encoding.GetString(bytes);
                     }
                 }
             }
             catch (Exception)
             {
-                return string.Empty;
+                return (false, string.Empty);
             }
         }
 
@@ -100,9 +105,9 @@ namespace AsyncNet
                             var buffer = ArrayPool<byte>.Shared.Rent(16 * 1024);
                             try
                             {
-                                while ((!length.HasValue) || length.Value > 0)
+                                using (var read = CancellationTokenSource.CreateLinkedTokenSource(token))
                                 {
-                                    using (var read = CancellationTokenSource.CreateLinkedTokenSource(token))
+                                    while ((!length.HasValue) || length.Value > 0)
                                     {
                                         read.CancelAfter(30000);
                                         var num = await input.ReadAsync(buffer, 0, buffer.Length, read.Token);

@@ -3,15 +3,44 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
 
 namespace Stock
 {
     class Program
     {
+        static string Md5(string path)
+        {
+            using (var hash = HashAlgorithm.Create("MD5"))
+            {
+                using (var stream = File.OpenRead(path))
+                {
+                    var bytes = hash.ComputeHash(stream);
+                    return BitConverter.ToString(bytes);
+                }
+            }
+        }
         static async Task Main(string[] args)
         {
+            var dirs = new[] { @"G:\video", @"G:\video2", @"H:\video2", @"H:\video", @"I:\video2", @"I:\video", @"E:\test\video" };
+            var set = new HashSet<string>();
+            foreach (var dir in dirs)
+            {
+                var files = Directory.GetFiles(dir);
+                foreach (var file in files)
+                {
+                    var md5 = Md5(file);
+                    if (!set.Add(md5))
+                    {
+                        Console.WriteLine(file);
+                        File.Move(file, @"I:\temp\" + Path.GetFileName(file));
+                    }
+                }
+            }
+
             var client = new HttpClient();
             var list = new List<Stock>();
             for (var p = 1; ; p++)

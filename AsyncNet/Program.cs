@@ -1,20 +1,14 @@
 ﻿using System;
-using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics.Tracing;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Reflection;
-using System.Net.Sockets;
-using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using CommandLine;
-using System.Diagnostics;
 
 namespace AsyncNet
 {
@@ -44,6 +38,14 @@ namespace AsyncNet
 
         [Option('D', "time", Required = false, Default = 90, HelpText = "video download require max time.")]
         public int DownloadTime { get; set; }
+        [Option("depth", Required = false, Default = 6, HelpText = "crawl max depth.max depth=9", Max = 9)]
+        public byte Depth { get; set; }
+    }
+
+    class Link
+    {
+        public string Url { get; set; }
+        public byte Depth { get; set; }
     }
 
     public class Program
@@ -63,6 +65,7 @@ namespace AsyncNet
         private static string _storePath = @"E:\test\video";
         private static int _parallelSize = 8;
         private static int _time = 90 * 1000;
+        private static byte _maxDepth = 6;
 
         const string baseHost = "https://www.xvideos.com";
         static async Task Main(string[] args)
@@ -77,67 +80,95 @@ namespace AsyncNet
                 _tempPath = option.TempPath;
                 _storePath = option.VideoStorePath;
                 _parallelSize = option.ParallelSize;
+                _blackPath = option.BlackUrlPath;
+                _maxDepth = option.Depth;
             });
             var speedCounter = new Speed();
             var visitedUrls = File.Exists(_visitePath)
-                ? File.ReadLines(_visitePath).Select(Convert).ToHashSet()
+                ? File.ReadLines(_visitePath).Where(Utils.IsNotNullOrWhiteSpace).Select(Convert).ToHashSet()
                 : new HashSet<uint>();
-            var visitedPage = new HashSet<string>();
-            Queue<string> starts = new Queue<string>(), urls = new Queue<string>();
+            var filter = new HashSet<string>();
+            var starts = new Queue<string>();
             var pages = new Stack<string>();
             if (File.Exists(_blackPath))
             {
-                foreach (var url in File.ReadLines(_blackPath))
+                foreach (var url in File.ReadLines(_blackPath).Where(Utils.IsNotNullOrWhiteSpace))
                 {
-                    visitedPage.Add(url);
+                    filter.Add(url);
                 }
             }
             if (File.Exists(_startPath))
             {
                 var links = new List<string>();
-                var filter = new HashSet<string>();
-                foreach (var url in File.ReadLines(_startPath).Distinct())
+                var set = new HashSet<string>();
+                foreach (var url in File.ReadLines(_startPath).Where(Utils.IsNotNullOrWhiteSpace).Distinct())
                 {
+                    var tag = url.Substring(url.LastIndexOf('/') + 1);
+                    if (filter.Contains(tag))
+                    {
+                        continue;
+                    }
                     starts.Enqueue(url + "/videos/best/0");
                     starts.Enqueue(url + "/favorites/0");
-                    if (filter.Add(url) && !visitedPage.Contains(url))
+                    if (set.Add(url))
                     {
                         links.Add(url);
                     }
                 }
+                File.Copy(_startPath, _startPath + ".bak", true);
                 File.WriteAllLines(_startPath, links);
+            }
+            var urls = new Queue<Link>();
+            if (File.Exists(_startItemPath))
+            {
+                foreach (var url in File.ReadLines(_startItemPath).Where(Utils.IsNotNullOrWhiteSpace).Select(url =>
+                {
+                    if (url.StartsWith(baseHost))
+                    {
+                        return new Link() { Url = url };
+                    }
+                    return new Link() { Url = url.Substring(2), Depth = (byte)url[0] };
+                }).GroupBy(l => l.Url).Where(g =>
+                {
+                    var id = Convert(g.Key);
+                    return !visitedUrls.Contains(id);
+                }))
+                {
+
+                    urls.Enqueue(url.OrderByDescending(it => it.Depth).First());
+                }
+                File.WriteAllLines(_startItemPath, urls.Select(url => url.Depth == 0 ? url.Url : $"{url.Depth}|{url.Url}"));
+            }
+            if (!Directory.Exists(_tempPath))
+            {
+                Directory.CreateDirectory(_tempPath);
             }
             var tempFiles = Directory.GetFiles(_tempPath, "*.ts");
             var tempIds = tempFiles.Select(f =>
             {
                 var idMatch = Regex.Match(f, @"(\d+)-(\d+)\.ts");
                 return idMatch.Success ? idMatch.Groups[1].Value : string.Empty;
-            }).GroupBy(f => f).OrderByDescending(g => g.Count());
+            }).GroupBy(f => f).Where(g => !string.IsNullOrEmpty(g.Key)).OrderByDescending(g => g.Count());
             foreach (var tempId in tempIds)
             {
-                urls.Enqueue($"https://www.xvideos.com/video{tempId.Key}/_");
-            }
-            var startItemIds = new HashSet<uint>();
-            if (File.Exists(_startItemPath))
-            {
-                foreach (var url in File.ReadLines(_startItemPath).Distinct().Where(s => { var id = Convert(s); startItemIds.Add(id); return !visitedUrls.Contains(id); }))
-                {
-                    urls.Enqueue(url);
-                }
-                File.WriteAllLines(_startItemPath, urls);
+                urls.Enqueue(new Link() { Url = $"https://www.xvideos.com/video{tempId.Key}/_" });
             }
 
-            var client = new HttpResponseTimeoutClient(new SocketsHttpHandler()
+            var socketHandler = new SocketsHttpHandler()
             {
                 ConnectTimeout = TimeSpan.FromSeconds(15),
                 AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
                 PooledConnectionIdleTimeout = TimeSpan.FromMinutes(5)
-            })
+            };
+
+            var client = new HttpClient(new HttpResponseTimeoutHandler(socketHandler)
+            {
+                ResponseTimeout = TimeSpan.FromSeconds(15)
+            }, true)
             {
                 Timeout = TimeSpan.FromMinutes(10),
-                ResponseTimeout = TimeSpan.FromSeconds(15),
                 DefaultRequestHeaders =
-                {
+            {
                     {
                         "User-Agent",
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.130 Safari/537.36"
@@ -148,30 +179,21 @@ namespace AsyncNet
                     },
                     {"Accept-Encoding", "gzip, deflate, br"},
                     {"Connection", "keep-alive"}
-                }
+            }
             };
             var downPartQueue = new ConcurrentQueue<int>();
             var parts = new List<string>();
             while (true)
             {
-                var size = urls.Count;
-                var deep = false;
-                while (urls.TryDequeue(out var url))
+                while (urls.TryDequeue(out var item))
                 {
-                    size--;
-                    if (size == 0)
+                    if (item.Depth >= _maxDepth)
                     {
-                        if (deep)
-                        {
-                            urls.Clear();
-                            break;
-                        }
-                        deep = true;
-                        size = urls.Count;
-                        await File.AppendAllLinesAsync(_startItemPath, urls);
+                        continue;
                     }
                     try
                     {
+                        var url = item.Url;
                         var videoId = Convert(url);
                         if (visitedUrls.Contains(videoId))
                         {
@@ -179,33 +201,48 @@ namespace AsyncNet
                         }
 
                         Console.WriteLine("start down {0}", url);
-                        var html = await client.GetStringOrNullAsync(url);
-                        if (string.IsNullOrEmpty(html))
+                        var res = await client.GetStringOrNullAsync(url);
+                        if (string.IsNullOrEmpty(res.Item2))
                         {
+                            if (res.Item1)
+                            {
+                                visitedUrls.Add(videoId);
+                                File.AppendAllText(_visitePath, url + Environment.NewLine);
+                            }
+                            await Task.Delay(1000);
+                            continue;
+                        }
+                        var html = res.Item2;
+                        var tagFilter = Regex.Matches(html, @"/(tags|channels|model-channels|channels|amateur-channels|profiles)/([^""]+)", RegexOptions.Compiled).Any(m => m.Success && filter.Contains(m.Groups[2].Value));
+                        if (tagFilter)
+                        {
+                            visitedUrls.Add(videoId);
+                            File.AppendAllText(_visitePath, url + Environment.NewLine);
                             continue;
                         }
 
                         var models = Regex.Matches(html, @"""(/models/.+?)""", RegexOptions.Compiled)
-                            .Where(m => m.Success).Select(m =>
+                            .Union(Regex.Matches(html, @"""(\\/(model-channels|channels|amateur-channels)\\/.+?)""", RegexOptions.Compiled)).Where(m => m.Success).Select(m =>
                             {
-                                var link = baseHost + m.Groups[1].Value;
+                                var tag = Regex.Unescape(m.Groups[1].Value);
+                                if (filter.Contains(tag.Substring(tag.LastIndexOf('/') + 1)))
+                                {
+                                    return string.Empty;
+                                }
+                                var link = baseHost + tag;
                                 starts.Enqueue(link + "/videos/best/0");
+                                starts.Enqueue(link + "/favorites/0");
                                 return link;
-                            }).Union(Regex.Matches(html, @"""(\\/(model-channels|channels|amateur-channels)\\/.+?)""", RegexOptions.Compiled).Where(m => m.Success).Select(m =>
-                            {
-                                var link = baseHost + Regex.Unescape(m.Groups[1].Value);
-                                starts.Enqueue(link + "/videos/best/0");
-                                return link;
-                            })).Distinct();
+                            }).Distinct();
                         File.AppendAllLines(_startPath, models);
-                        if (!startItemIds.Contains(videoId) && !deep)
+                        var relates = Regex.Matches(html, @"""(\\/video\d+?\\/.+?)""", RegexOptions.Compiled).Where(m => m.Success).Select(r =>
                         {
-                            var relates = Regex.Matches(html, @"""(\\/video\d+?\\/.+?)""", RegexOptions.Compiled).Where(m => m.Success);
-                            foreach (var r in relates)
-                            {
-                                urls.Enqueue(baseHost + Regex.Unescape(r.Groups[1].Value));
-                            }
-                        }
+                            var l = baseHost + Regex.Unescape(r.Groups[1].Value);
+                            var link = new Link() { Url = l, Depth = (byte)(item.Depth + 1) };
+                            urls.Enqueue(link);
+                            return $"{link.Depth}|{link.Url}";
+                        });
+                        await File.AppendAllLinesAsync(_startItemPath, relates);
 
                         var match = Regex.Match(html, @"'(https://.+\.xvideos-cdn\.com/.+/hls\.m3u8.*)'");
                         if (!match.Success)
@@ -222,7 +259,7 @@ namespace AsyncNet
 
                         var hls = match.Groups[1].Value;
                         Console.WriteLine(hls);
-                        html = await client.GetStringOrNullAsync(hls);
+                        html = (await client.GetStringOrNullAsync(hls)).Item2;
                         if (string.IsNullOrEmpty(html))
                         {
                             continue;
@@ -244,7 +281,7 @@ namespace AsyncNet
                         var downHls = baseUrl + hlsDic.Where(kv => kv.Key < 1080).OrderByDescending(kv => kv.Key)
                                           .First().Value;
                         Console.WriteLine(downHls);
-                        html = await client.GetStringOrNullAsync(downHls);
+                        html = (await client.GetStringOrNullAsync(downHls)).Item2;
                         if (string.IsNullOrEmpty(html))
                         {
                             continue;
@@ -339,8 +376,8 @@ namespace AsyncNet
                                                           {
                                                               while (flag)
                                                               {
-                                                                  var res = await client.GetRangeContent(partUrl, stream, start + (int)stream.Position, end, cancel.Token);
-                                                                  if (res)
+                                                                  var _ = await client.GetRangeContent(partUrl, stream, start + (int)stream.Position, end, cancel.Token);
+                                                                  if (_)
                                                                   {
                                                                       partFlags[pIndex] = true;
                                                                       return;
@@ -388,9 +425,9 @@ namespace AsyncNet
                                           }
                                       }
                                   }
-                                  foreach (var item in parallelStreams)
+                                  foreach (var stream in parallelStreams)
                                   {
-                                      item.Dispose();
+                                      stream.Dispose();
                                   }
                               });
 
@@ -433,7 +470,7 @@ namespace AsyncNet
                     catch (Exception ex)
                     {
                         Console.WriteLine(ex);
-                        urls.Enqueue(url);
+                        urls.Enqueue(item);
                     }
                 }
 
@@ -442,13 +479,17 @@ namespace AsyncNet
                     break;
                 }
 
-                if (visitedPage.Contains(page))
+                if (filter.Contains(page))
                 {
                     continue;
                 }
                 Console.WriteLine(page);
                 var parentUrl = page.Substring(0, page.LastIndexOf('/') + 1);
-                var listHtml = await client.GetStringOrNullAsync(page);
+                var listHtml = (await client.GetStringOrNullAsync(page)).Item2;
+                if (string.IsNullOrEmpty(listHtml))
+                {
+                    continue;
+                }
                 var pageMatches = Regex.Matches(listHtml, @"""#(\d+)""", RegexOptions.Compiled);
                 foreach (var pageMatch in pageMatches.Select(m => m.Groups[1].Value).Distinct())
                 {
@@ -459,14 +500,20 @@ namespace AsyncNet
                 var pageItems = matches.Where(m => m.Success)
                     .Select(m => baseHost + m.Groups[1].Value)
                     .Distinct();
-                foreach (var item in pageItems)
+                foreach (var pageItem in pageItems)
                 {
-                    urls.Enqueue(item);
+                    urls.Enqueue(new Link() { Url = pageItem });
                 }
-                visitedPage.Add(page);
+                File.AppendAllLines(_startItemPath, pageItems);
+                filter.Add(page);
             }
 
             Console.WriteLine("over");
+        }
+
+        private static void Program_Changed(object sender, FileSystemEventArgs e)
+        {
+            throw new NotImplementedException();
         }
     }
 }
