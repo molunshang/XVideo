@@ -38,8 +38,8 @@ namespace AsyncNet
 
         [Option('D', "time", Required = false, Default = 90, HelpText = "video download require max time.")]
         public int DownloadTime { get; set; }
-        [Option("depth", Required = false, Default = 6, HelpText = "crawl max depth.max depth=9", Max = 9)]
-        public byte Depth { get; set; }
+        [Option("depth", Required = false, Default = 6, HelpText = "crawl url depth.min=0,max=9")]
+        public int Depth { get; set; }
     }
 
     class Link
@@ -81,7 +81,7 @@ namespace AsyncNet
                 _storePath = option.VideoStorePath;
                 _parallelSize = option.ParallelSize;
                 _blackPath = option.BlackUrlPath;
-                _maxDepth = option.Depth;
+                _maxDepth = (byte)Math.Min(9, option.Depth);
             });
             var speedCounter = new Speed();
             var visitedUrls = File.Exists(_visitePath)
@@ -119,26 +119,7 @@ namespace AsyncNet
                 File.WriteAllLines(_startPath, links);
             }
             var urls = new Queue<Link>();
-            if (File.Exists(_startItemPath))
-            {
-                foreach (var url in File.ReadLines(_startItemPath).Where(Utils.IsNotNullOrWhiteSpace).Select(url =>
-                {
-                    if (url.StartsWith(baseHost))
-                    {
-                        return new Link() { Url = url };
-                    }
-                    return new Link() { Url = url.Substring(2), Depth = (byte)url[0] };
-                }).GroupBy(l => l.Url).Where(g =>
-                {
-                    var id = Convert(g.Key);
-                    return !visitedUrls.Contains(id);
-                }))
-                {
-
-                    urls.Enqueue(url.OrderByDescending(it => it.Depth).First());
-                }
-                File.WriteAllLines(_startItemPath, urls.Select(url => url.Depth == 0 ? url.Url : $"{url.Depth}|{url.Url}"));
-            }
+            //未下载完视频处理
             if (!Directory.Exists(_tempPath))
             {
                 Directory.CreateDirectory(_tempPath);
@@ -153,6 +134,27 @@ namespace AsyncNet
             {
                 urls.Enqueue(new Link() { Url = $"https://www.xvideos.com/video{tempId.Key}/_" });
             }
+            //视频链接
+            if (File.Exists(_startItemPath))
+            {
+                foreach (var url in File.ReadLines(_startItemPath).Where(Utils.IsNotNullOrWhiteSpace).Select(url =>
+                {
+                    if (url.StartsWith(baseHost))
+                    {
+                        return new Link() { Url = url };
+                    }
+                    return new Link() { Url = url.Substring(2), Depth = url[0].ToByte() };
+                }).GroupBy(l => l.Url).Where(g =>
+                {
+                    var id = Convert(g.Key);
+                    return !visitedUrls.Contains(id);
+                }))
+                {
+                    urls.Enqueue(url.OrderBy(it => it.Depth).First());
+                }
+                File.WriteAllLines(_startItemPath, urls.Select(url => url.Depth == 0 ? url.Url : $"{url.Depth}|{url.Url}"));
+            }
+
 
             var socketHandler = new SocketsHttpHandler()
             {

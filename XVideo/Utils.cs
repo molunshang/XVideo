@@ -14,5 +14,10 @@ namespace AsyncNet
         {
             return !string.IsNullOrWhiteSpace(str);
         }
+
+        public static byte ToByte(this char c)
+        {
+            return (byte)(c - 48);
+        }
     }
 }

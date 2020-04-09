@@ -11,3 +11,6 @@
 *.user
 /Stock/bin/Debug/netcoreapp3.1
 /Stock/obj
+/XVideo/Properties/PublishProfiles
+/XVideo/obj
+/XVideo/bin

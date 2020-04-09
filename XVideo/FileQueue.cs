@@ -151,7 +151,7 @@ namespace AsyncNet
                 {
                     _count--;
                     var length = reader.ReadInt32();
-                    var byteArray =new byte[length];
+                    var byteArray = new byte[length];
                     var index = 0;
                     while (index < length)
                     {
@@ -170,6 +170,7 @@ namespace AsyncNet
         {
             writer.Dispose();
             reader.Dispose();
+            GC.SuppressFinalize(this);
         }
     }
 }
