@@ -14,32 +14,34 @@ namespace AsyncNet
 {
     class Options
     {
-        [Option('s', "start", Required = false, Default = @"E:\test\starts.txt", HelpText = "start page url file path.")]
+        [Option('s', "start", Required = false, Default = "starts.txt", HelpText = "start page url file path.")]
         public string StartPagePath { get; set; }
 
-        [Option('r', "record", Required = false, Default = @"E:\test\visited.txt",
+        [Option('r', "record", Required = false, Default = "visited.txt",
             HelpText = "visited url record file path.")]
         public string VisitedUrlPath { get; set; }
-        [Option('b', "black", Required = false, Default = @"E:\test\blacks.txt",
+        [Option('b', "black", Required = false, Default = "blacks.txt",
             HelpText = "the black urls file path.")]
         public string BlackUrlPath { get; set; }
 
-        [Option('d', "dest", Required = false, Default = @"E:\test\video", HelpText = "video save path.")]
+        [Option('d', "dest", Required = false, Default = "video", HelpText = "video save path.")]
         public string VideoStorePath { get; set; }
 
-        [Option('t', "temp", Required = false, Default = @"E:\test\", HelpText = "temp file save path.")]
+        [Option('t', "temp", Required = false, Default = "", HelpText = "temp file save path.")]
         public string TempPath { get; set; }
 
         [Option('p', "parallel", Required = false, Default = 8, HelpText = "video download parallel size.")]
         public int ParallelSize { get; set; }
 
-        [Option('S', "start-detail", Required = false, Default = @"E:\test\items.txt", HelpText = "start item url file path..")]
+        [Option('S', "start-detail", Required = false, Default = "items.txt", HelpText = "start item url file path..")]
         public string StartItemPath { get; set; }
 
         [Option('D', "time", Required = false, Default = 90, HelpText = "video download require max time.")]
         public int DownloadTime { get; set; }
         [Option("depth", Required = false, Default = 6, HelpText = "crawl url depth.min=0,max=9")]
         public int Depth { get; set; }
+        [Option("deep", Required = false, Default = false, HelpText = "use dfs first")]
+        public bool Deep { get; set; }
     }
 
     class Link
@@ -57,12 +59,14 @@ namespace AsyncNet
                 string.IsNullOrEmpty(match.Groups[1].Value) ? match.Groups[2].Value : match.Groups[1].Value);
         }
 
-        private static string _visitePath = @"E:\test\visited.txt";
-        private static string _blackPath = @"E:\test\blacks.txt";
-        private static string _startPath = @"E:\test\starts.txt";
-        private static string _startItemPath = @"E:\test\items.txt";
-        private static string _tempPath = @"E:\test\";
-        private static string _storePath = @"E:\test\video";
+        private static bool deep = false;
+        private static string _visitePath = "visited.txt";
+        private static string _blackPath = "blacks.txt";
+        private static string _startPath = "starts.txt";
+        private static string _startPathHistory = _startPath + ".history";
+        private static string _startItemPath = "items.txt";
+        private static string _tempPath = "";
+        private static string _storePath = "video";
         private static int _parallelSize = 8;
         private static int _time = 90 * 1000;
         private static byte _maxDepth = 6;
@@ -70,10 +74,17 @@ namespace AsyncNet
         const string baseHost = "https://www.xvideos.com";
         static async Task Main(string[] args)
         {
+            var running = true;
+            Console.CancelKeyPress += (sender, e) =>
+            {
+                e.Cancel = true;
+                running = false;
+            };
             HttpEventListener.Init();
             Parser.Default.ParseArguments<Options>(args).WithParsed(option =>
             {
                 _startPath = option.StartPagePath;
+                _startPathHistory = _startPath + ".history";
                 _visitePath = option.VisitedUrlPath;
                 _time = option.DownloadTime * 1000;
                 _startItemPath = option.StartItemPath;
@@ -82,7 +93,15 @@ namespace AsyncNet
                 _parallelSize = option.ParallelSize;
                 _blackPath = option.BlackUrlPath;
                 _maxDepth = (byte)Math.Min(9, option.Depth);
+                deep = option.Deep;
+            }).WithNotParsed(err =>
+            {
+                running = false;
             });
+            if (!running)
+            {
+                return;
+            }
             var speedCounter = new Speed();
             var visitedUrls = File.Exists(_visitePath)
                 ? File.ReadLines(_visitePath).Where(Utils.IsNotNullOrWhiteSpace).Select(Convert).ToHashSet()
@@ -99,30 +118,43 @@ namespace AsyncNet
             }
             if (File.Exists(_startPath))
             {
-                var links = new List<string>();
-                var set = new HashSet<string>();
-                foreach (var url in File.ReadLines(_startPath).Where(Utils.IsNotNullOrWhiteSpace).Distinct())
+                var links = new LinkedList<string>();
+                var dict = new Dictionary<string, LinkedListNode<string>>();
+                foreach (var url in File.ReadLines(_startPath).Where(Utils.IsNotNullOrWhiteSpace))
                 {
                     var tag = url.Substring(url.LastIndexOf('/') + 1);
-                    if (filter.Contains(tag))
+                    if (filter.Contains(tag) || dict.ContainsKey(url))
                     {
                         continue;
                     }
                     starts.Enqueue(url + "/videos/best/0");
                     starts.Enqueue(url + "/favorites/0");
-                    if (set.Add(url))
+                    dict[url] = links.AddLast(url);
+                }
+                if (File.Exists(_startPathHistory))
+                {
+                    foreach (var url in File.ReadLines(_startPathHistory).Where(Utils.IsNotNullOrWhiteSpace))
                     {
-                        links.Add(url);
+                        if (dict.TryGetValue(url, out var node))
+                        {
+                            links.Remove(node);
+                        }
+                        dict[url] = links.AddLast(url);
                     }
                 }
                 File.Copy(_startPath, _startPath + ".bak", true);
                 File.WriteAllLines(_startPath, links);
+                dict.Clear();
             }
             var urls = new Queue<Link>();
             //未下载完视频处理
             if (!Directory.Exists(_tempPath))
             {
                 Directory.CreateDirectory(_tempPath);
+            }
+            if (!Directory.Exists(_storePath))
+            {
+                Directory.CreateDirectory(_storePath);
             }
             var tempFiles = Directory.GetFiles(_tempPath, "*.ts");
             var tempIds = tempFiles.Select(f =>
@@ -135,24 +167,9 @@ namespace AsyncNet
                 urls.Enqueue(new Link() { Url = $"https://www.xvideos.com/video{tempId.Key}/_" });
             }
             //视频链接
-            if (File.Exists(_startItemPath))
+            if (deep)
             {
-                foreach (var url in File.ReadLines(_startItemPath).Where(Utils.IsNotNullOrWhiteSpace).Select(url =>
-                {
-                    if (url.StartsWith(baseHost))
-                    {
-                        return new Link() { Url = url };
-                    }
-                    return new Link() { Url = url.Substring(2), Depth = url[0].ToByte() };
-                }).GroupBy(l => l.Url).Where(g =>
-                {
-                    var id = Convert(g.Key);
-                    return !visitedUrls.Contains(id);
-                }))
-                {
-                    urls.Enqueue(url.OrderBy(it => it.Depth).First());
-                }
-                File.WriteAllLines(_startItemPath, urls.Select(url => url.Depth == 0 ? url.Url : $"{url.Depth}|{url.Url}"));
+                LoadVideoItems(visitedUrls, urls);
             }
 
 
@@ -185,11 +202,12 @@ namespace AsyncNet
             };
             var downPartQueue = new ConcurrentQueue<int>();
             var parts = new List<string>();
-            while (true)
+            var noVideoSize = 0;
+            while (running)
             {
-                while (urls.TryDequeue(out var item))
+                while (running && urls.TryDequeue(out var item))
                 {
-                    if (item.Depth >= _maxDepth)
+                    if (item.Depth >= _maxDepth || item.Url.Contains("THUMBNUM"))
                     {
                         continue;
                     }
@@ -201,7 +219,10 @@ namespace AsyncNet
                         {
                             continue;
                         }
-
+                        if (!url.StartsWith("https://") && !url.StartsWith("http://"))
+                        {
+                            url = baseHost + url;
+                        }
                         Console.WriteLine("start down {0}", url);
                         var res = await client.GetStringOrNullAsync(url);
                         if (string.IsNullOrEmpty(res.Item2))
@@ -239,9 +260,12 @@ namespace AsyncNet
                         File.AppendAllLines(_startPath, models);
                         var relates = Regex.Matches(html, @"""(\\/video\d+?\\/.+?)""", RegexOptions.Compiled).Where(m => m.Success).Select(r =>
                         {
-                            var l = baseHost + Regex.Unescape(r.Groups[1].Value);
+                            var l = Regex.Unescape(r.Groups[1].Value);
                             var link = new Link() { Url = l, Depth = (byte)(item.Depth + 1) };
-                            urls.Enqueue(link);
+                            if (deep)
+                            {
+                                urls.Enqueue(link);
+                            }
                             return $"{link.Depth}|{link.Url}";
                         });
                         await File.AppendAllLinesAsync(_startItemPath, relates);
@@ -249,9 +273,14 @@ namespace AsyncNet
                         var match = Regex.Match(html, @"'(https://.+\.xvideos-cdn\.com/.+/hls\.m3u8.*)'");
                         if (!match.Success)
                         {
+                            noVideoSize++;
+                            if (noVideoSize >= 60)
+                            {
+                                running = false;
+                            }
                             continue;
                         }
-
+                        noVideoSize = 0;
                         var filePath = Guid.NewGuid().ToString();
                         var title = Regex.Match(html, "<title>(.+) - XVIDEOS.COM</title>");
                         if (title.Success)
@@ -478,6 +507,14 @@ namespace AsyncNet
 
                 if (!pages.TryPop(out var page) && !starts.TryDequeue(out page))
                 {
+                    if (!deep)
+                    {
+                        LoadVideoItems(visitedUrls, urls);
+                        if (urls.Count > 0)
+                        {
+                            continue;
+                        }
+                    }
                     break;
                 }
 
@@ -500,7 +537,7 @@ namespace AsyncNet
 
                 var matches = Regex.Matches(listHtml, @"href=""(/prof-video-click/.+?)""", RegexOptions.Compiled);
                 var pageItems = matches.Where(m => m.Success)
-                    .Select(m => baseHost + m.Groups[1].Value)
+                    .Select(m => m.Groups[1].Value)
                     .Distinct();
                 foreach (var pageItem in pageItems)
                 {
@@ -508,14 +545,43 @@ namespace AsyncNet
                 }
                 File.AppendAllLines(_startItemPath, pageItems);
                 filter.Add(page);
+                var subIndex = page.IndexOf("/videos/best/");
+                if (subIndex < 0)
+                {
+                    subIndex = page.IndexOf("/favorites/");
+                }
+                if (subIndex > -1)
+                {
+                    page = page.Substring(0, subIndex);
+                }
+                File.AppendAllLines(_startPathHistory, new[] { page });
             }
 
             Console.WriteLine("over");
         }
 
-        private static void Program_Changed(object sender, FileSystemEventArgs e)
+        private static void LoadVideoItems(HashSet<uint> visitedUrls, Queue<Link> urls)
         {
-            throw new NotImplementedException();
+            if (!File.Exists(_startItemPath))
+            {
+                return;
+            }
+            foreach (var url in File.ReadLines(_startItemPath).Where(url => Utils.IsNotNullOrWhiteSpace(url) && !url.Contains("THUMBNUM")).Select(url =>
+            {
+                if (url.StartsWith(baseHost) || url.StartsWith('/'))
+                {
+                    return new Link() { Url = url };
+                }
+                return new Link() { Url = url.Substring(2), Depth = url[0].ToByte() };
+            }).GroupBy(l => l.Url).Where(g =>
+            {
+                var id = Convert(g.Key);
+                return !visitedUrls.Contains(id);
+            }))
+            {
+                urls.Enqueue(url.OrderBy(it => it.Depth).First());
+            }
+            File.WriteAllLines(_startItemPath, urls.Select(url => url.Depth == 0 ? url.Url : $"{url.Depth}|{url.Url}"));
         }
     }
 }

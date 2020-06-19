@@ -11,7 +11,6 @@ namespace AsyncNet
     public class HttpResponseTimeoutHandler : DelegatingHandler
     {
         private static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(1);
-        private static readonly FieldInfo CtsField = typeof(CancellationToken).GetField("_source", BindingFlags.Instance | BindingFlags.NonPublic);
         private static readonly Logger logger = LogManager.GetCurrentClassLogger();
 
         public TimeSpan ResponseTimeout { get; set; }
