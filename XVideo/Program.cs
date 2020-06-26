@@ -127,8 +127,6 @@ namespace AsyncNet
                     {
                         continue;
                     }
-                    starts.Enqueue(url + "/videos/best/0");
-                    starts.Enqueue(url + "/favorites/0");
                     dict[url] = links.AddLast(url);
                 }
                 if (File.Exists(_startPathHistory))
@@ -142,9 +140,16 @@ namespace AsyncNet
                         dict[url] = links.AddLast(url);
                     }
                 }
+                foreach (var url in links)
+                {
+                    starts.Enqueue(url + "/videos/best/0");
+                    starts.Enqueue(url + "/favorites/0");
+                }
                 File.Copy(_startPath, _startPath + ".bak", true);
                 File.WriteAllLines(_startPath, links);
+                File.WriteAllText(_startPathHistory, string.Empty);
                 dict.Clear();
+                links.Clear();
             }
             var urls = new Queue<Link>();
             //未下载完视频处理
@@ -524,18 +529,18 @@ namespace AsyncNet
                 }
                 Console.WriteLine(page);
                 var parentUrl = page.Substring(0, page.LastIndexOf('/') + 1);
-                var listHtml = (await client.GetStringOrNullAsync(page)).Item2;
-                if (string.IsNullOrEmpty(listHtml))
+                var pageRes = (await client.GetStringOrNullAsync(page));
+                if (string.IsNullOrEmpty(pageRes.Item2) && !pageRes.Item1)
                 {
                     continue;
                 }
-                var pageMatches = Regex.Matches(listHtml, @"""#(\d+)""", RegexOptions.Compiled);
+                var pageMatches = Regex.Matches(pageRes.Item2, @"""#(\d+)""", RegexOptions.Compiled);
                 foreach (var pageMatch in pageMatches.Select(m => m.Groups[1].Value).Distinct())
                 {
                     pages.Push(parentUrl + pageMatch);
                 }
 
-                var matches = Regex.Matches(listHtml, @"href=""(/prof-video-click/.+?)""", RegexOptions.Compiled);
+                var matches = Regex.Matches(pageRes.Item2, @"href=""(/prof-video-click/.+?)""", RegexOptions.Compiled);
                 var pageItems = matches.Where(m => m.Success)
                     .Select(m => m.Groups[1].Value)
                     .Distinct();
@@ -545,16 +550,23 @@ namespace AsyncNet
                 }
                 File.AppendAllLines(_startItemPath, pageItems);
                 filter.Add(page);
-                var subIndex = page.IndexOf("/videos/best/");
-                if (subIndex < 0)
+                if (pages.Count <= 0)
                 {
-                    subIndex = page.IndexOf("/favorites/");
+                    var subIndex = page.IndexOf("/videos/best/");
+                    if (subIndex < 0)
+                    {
+                        subIndex = page.IndexOf("/favorites/");
+                    }
+                    if (subIndex > -1)
+                    {
+                        page = page.Substring(0, subIndex);
+                    }
+                    if (starts.TryPeek(out var next) && next.StartsWith(page))
+                    {
+                        continue;
+                    }
+                    File.AppendAllLines(_startPathHistory, new[] { page });
                 }
-                if (subIndex > -1)
-                {
-                    page = page.Substring(0, subIndex);
-                }
-                File.AppendAllLines(_startPathHistory, new[] { page });
             }
 
             Console.WriteLine("over");
