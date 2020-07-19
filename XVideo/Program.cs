@@ -8,7 +8,9 @@ using System.Net.Http;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Web;
 using CommandLine;
+using NLog;
 
 namespace AsyncNet
 {
@@ -52,11 +54,16 @@ namespace AsyncNet
 
     public class Program
     {
+        private static readonly Logger logger = LogManager.GetCurrentClassLogger();
         public static uint Convert(string url)
         {
             var match = Regex.Match(url, @"/video(\d+)/|/(\d+)/", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-            return uint.Parse(
-                string.IsNullOrEmpty(match.Groups[1].Value) ? match.Groups[2].Value : match.Groups[1].Value);
+            if (uint.TryParse(string.IsNullOrEmpty(match.Groups[1].Value) ? match.Groups[2].Value : match.Groups[1].Value, out var id))
+            {
+                return id;
+            }
+            logger.Warn("wrong url " + url);
+            return 0;
         }
 
         private static bool deep = false;
@@ -142,8 +149,7 @@ namespace AsyncNet
                 }
                 foreach (var url in links)
                 {
-                    starts.Enqueue(url + "/videos/best/0");
-                    starts.Enqueue(url + "/favorites/0");
+                    starts.Enqueue(url);
                 }
                 File.Copy(_startPath, _startPath + ".bak", true);
                 File.WriteAllLines(_startPath, links);
@@ -205,9 +211,21 @@ namespace AsyncNet
                     {"Connection", "keep-alive"}
             }
             };
+            var parallelStreamGroup = new Stream[_parallelSize][];
+            for (int i = 0; i < parallelStreamGroup.Length; i++)
+            {
+                var parallelStreams = new Stream[_parallelSize];
+                for (int j = 0; j < parallelStreams.Length; j++)
+                {
+                    parallelStreams[j] = new MemoryStream();
+                }
+                parallelStreamGroup[i] = parallelStreams;
+            }
             var downPartQueue = new ConcurrentQueue<int>();
             var parts = new List<string>();
             var noVideoSize = 0;
+            var downSize = -1;
+            string currentStart = string.Empty;
             while (running)
             {
                 while (running && urls.TryDequeue(out var item))
@@ -218,7 +236,7 @@ namespace AsyncNet
                     }
                     try
                     {
-                        var url = item.Url;
+                        var url = HttpUtility.HtmlDecode(item.Url);
                         var videoId = Convert(url);
                         if (visitedUrls.Contains(videoId))
                         {
@@ -229,6 +247,7 @@ namespace AsyncNet
                             url = baseHost + url;
                         }
                         Console.WriteLine("start down {0}", url);
+                        downSize++;
                         var res = await client.GetStringOrNullAsync(url);
                         if (string.IsNullOrEmpty(res.Item2))
                         {
@@ -258,8 +277,7 @@ namespace AsyncNet
                                     return string.Empty;
                                 }
                                 var link = baseHost + tag;
-                                starts.Enqueue(link + "/videos/best/0");
-                                starts.Enqueue(link + "/favorites/0");
+                                starts.Enqueue(link);
                                 return link;
                             }).Distinct();
                         File.AppendAllLines(_startPath, models);
@@ -343,14 +361,8 @@ namespace AsyncNet
                         var successSize = 0;
                         using (var commonCts = new CancellationTokenSource())
                         {
-                            var downTasks = Enumerable.Range(0, _parallelSize).Select(async index =>
+                            var downTasks = Enumerable.Range(0, parallelStreamGroup.Length).Select(async index =>
                               {
-                                  var parallelStreams = new Stream[_parallelSize];
-                                  var partFlags = new bool[_parallelSize];
-                                  for (int i = 0; i < parallelStreams.Length; i++)
-                                  {
-                                      parallelStreams[i] = new MemoryStream();
-                                  }
                                   while (downPartQueue.TryDequeue(out var local) && success)
                                   {
                                       var part = parts[local];
@@ -397,9 +409,10 @@ namespace AsyncNet
                                                   }
                                                   else
                                                   {
+                                                      var parallelStreams = parallelStreamGroup[index];
                                                       var partLength = length / parallelStreams.Length;
                                                       var tasks = new List<Task>();
-
+                                                      var partFlags = new bool[_parallelSize];
                                                       for (int i = 0, j = parallelStreams.Length - 1; i <= j; i++)
                                                       {
                                                           var pIndex = i;
@@ -461,10 +474,6 @@ namespace AsyncNet
                                           }
                                       }
                                   }
-                                  foreach (var stream in parallelStreams)
-                                  {
-                                      stream.Dispose();
-                                  }
                               });
 
                             await Task.WhenAll(downTasks);
@@ -509,64 +518,78 @@ namespace AsyncNet
                         urls.Enqueue(item);
                     }
                 }
-
-                if (!pages.TryPop(out var page) && !starts.TryDequeue(out page))
+                if (!running)
                 {
-                    if (!deep)
-                    {
-                        LoadVideoItems(visitedUrls, urls);
-                        if (urls.Count > 0)
-                        {
-                            continue;
-                        }
-                    }
                     break;
                 }
+                if (!pages.TryPop(out var page))
+                {
+                    File.AppendAllLines(_startPathHistory, new[] { currentStart });
+                    if (starts.TryDequeue(out currentStart))
+                    {
+                        if (currentStart.Contains("/tags/", StringComparison.OrdinalIgnoreCase))
+                        {
+                            page = currentStart + "/0";
+                        }
+                        else
+                        {
+                            page = currentStart + "/videos/best/0";
+                            pages.Push(currentStart + "/favorites/0");
+                        }
+                    }
+                    else
+                    {
+                        if (!deep)
+                        {
+                            LoadVideoItems(visitedUrls, urls);
+                            if (urls.Count > 0)
+                            {
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+                }
 
-                if (filter.Contains(page))
+                if (!filter.Contains(page))
                 {
-                    continue;
-                }
-                Console.WriteLine(page);
-                var parentUrl = page.Substring(0, page.LastIndexOf('/') + 1);
-                var pageRes = (await client.GetStringOrNullAsync(page));
-                if (string.IsNullOrEmpty(pageRes.Item2) && !pageRes.Item1)
-                {
-                    continue;
-                }
-                var pageMatches = Regex.Matches(pageRes.Item2, @"""#(\d+)""", RegexOptions.Compiled);
-                foreach (var pageMatch in pageMatches.Select(m => m.Groups[1].Value).Distinct())
-                {
-                    pages.Push(parentUrl + pageMatch);
-                }
-
-                var matches = Regex.Matches(pageRes.Item2, @"href=""(/prof-video-click/.+?)""", RegexOptions.Compiled);
-                var pageItems = matches.Where(m => m.Success)
-                    .Select(m => m.Groups[1].Value)
-                    .Distinct();
-                foreach (var pageItem in pageItems)
-                {
-                    urls.Enqueue(new Link() { Url = pageItem });
-                }
-                File.AppendAllLines(_startItemPath, pageItems);
-                filter.Add(page);
-                if (pages.Count <= 0)
-                {
-                    var subIndex = page.IndexOf("/videos/best/");
-                    if (subIndex < 0)
+                    if (downSize == 0)
                     {
-                        subIndex = page.IndexOf("/favorites/");
+                        await Task.Delay(1000);
                     }
-                    if (subIndex > -1)
+                    Console.WriteLine(page);
+                    var parentUrl = page.Substring(0, page.LastIndexOf('/') + 1);
+                    var pageRes = (await client.GetStringOrNullAsync(page));
+                    if (!string.IsNullOrEmpty(pageRes.Item2))
                     {
-                        page = page.Substring(0, subIndex);
+                        var pageMatches = Regex.Matches(pageRes.Item2, @"href=""#(\d+)""", RegexOptions.Compiled);
+                        foreach (var pageMatch in pageMatches.Select(m => m.Groups[1].Value).Distinct())
+                        {
+                            var pageUrl = parentUrl + pageMatch;
+                            if (filter.Contains(pageUrl))
+                            {
+                                continue;
+                            }
+                            pages.Push(pageUrl);
+                        }
+                        pageMatches = Regex.Matches(pageRes.Item2, @"href=""(/favorite/\d+/.+?)""", RegexOptions.Compiled);
+                        foreach (var pageMatch in pageMatches.Select(m => m.Groups[1].Value).Distinct())
+                        {
+                            pages.Push(baseHost + pageMatch);
+                        }
+                        var matches = Regex.Matches(pageRes.Item2, @"href=""(/prof-video-click/.+?|/video\d+/.+?)""", RegexOptions.Compiled);
+                        var pageItems = matches.Where(m => m.Success)
+                            .Select(m => m.Groups[1].Value)
+                            .Distinct();
+                        foreach (var pageItem in pageItems)
+                        {
+                            urls.Enqueue(new Link() { Url = pageItem });
+                        }
+                        File.AppendAllLines(_startItemPath, pageItems);
+                        filter.Add(page);
                     }
-                    if (starts.TryPeek(out var next) && next.StartsWith(page))
-                    {
-                        continue;
-                    }
-                    File.AppendAllLines(_startPathHistory, new[] { page });
                 }
+                downSize = 0;
             }
 
             Console.WriteLine("over");

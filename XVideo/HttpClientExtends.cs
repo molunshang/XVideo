@@ -41,8 +41,9 @@ namespace AsyncNet
                     }
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                logger.Error(ex, $"response error.url={url}");
                 return (false, string.Empty);
             }
         }
@@ -64,8 +65,9 @@ namespace AsyncNet
                     }
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                logger.Error(ex, $"response error.url={url}");
                 return -1;
             }
         }
@@ -97,7 +99,6 @@ namespace AsyncNet
                     {
                         if (!response.IsSuccessStatusCode)
                         {
-                            Console.WriteLine(response.ReasonPhrase);
                             return response.StatusCode == System.Net.HttpStatusCode.RequestedRangeNotSatisfiable;
                         }
                         using (var input = await response.Content.ReadAsStreamAsync())
@@ -136,10 +137,7 @@ namespace AsyncNet
             }
             catch (Exception ex)
             {
-                if (ex is TaskCanceledException)
-                {
-                    logger.Error("stream read timeout.url={0}", url);
-                }
+                logger.Error(ex, $"stream read error.url={url}");
                 return false;
             }
         }
