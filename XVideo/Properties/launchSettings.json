@@ -2,7 +2,7 @@
   "profiles": {
     "XVideo": {
       "commandName": "Project",
-      "commandLineArgs": "-D 600 -d J:\\video -s K:\\xvideo\\starts.txt -t G:\\temp\\  -r K:\\xvideo\\visited.txt -b K:\\xvideo\\blacks.txt -S K:\\xvideo\\items.txt --deep"
+      "commandLineArgs": "-D 600 -d J:\\video -s K:\\xvideo\\starts.txt -t G:\\temp\\  -r K:\\xvideo\\visited.txt -b K:\\xvideo\\blacks.txt -S K:\\xvideo\\items.txt "
     }
   }
 }

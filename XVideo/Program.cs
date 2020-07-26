@@ -226,10 +226,12 @@ namespace AsyncNet
             var noVideoSize = 0;
             var downSize = -1;
             string currentStart = string.Empty;
+            var hasDown = false;
             while (running)
             {
                 while (running && urls.TryDequeue(out var item))
                 {
+                    hasDown = true;
                     if (item.Depth >= _maxDepth || item.Url.Contains("THUMBNUM"))
                     {
                         continue;
@@ -436,7 +438,7 @@ namespace AsyncNet
                                                                       flag = false;
                                                                       return;
                                                                   }
-                                                                  await Task.Delay(100);
+                                                                  await Task.Delay(500);
                                                               }
                                                           }));
                                                       }
@@ -524,12 +526,20 @@ namespace AsyncNet
                 }
                 if (!pages.TryPop(out var page))
                 {
-                    File.AppendAllLines(_startPathHistory, new[] { currentStart });
+                    if (hasDown)
+                    {
+                        File.AppendAllLines(_startPathHistory, new[] { currentStart });
+                    }
                     if (starts.TryDequeue(out currentStart))
                     {
+                        hasDown = false;
                         if (currentStart.Contains("/tags/", StringComparison.OrdinalIgnoreCase))
                         {
                             page = currentStart + "/0";
+                        }
+                        else if (currentStart.Contains("/?k=", StringComparison.OrdinalIgnoreCase))
+                        {
+                            page = currentStart + "&p=0";
                         }
                         else
                         {
@@ -558,11 +568,12 @@ namespace AsyncNet
                         await Task.Delay(1000);
                     }
                     Console.WriteLine(page);
-                    var parentUrl = page.Substring(0, page.LastIndexOf('/') + 1);
+                    var parentUrl = Regex.Replace(page, @"(\d+$)", string.Empty, RegexOptions.Compiled);
                     var pageRes = (await client.GetStringOrNullAsync(page));
                     if (!string.IsNullOrEmpty(pageRes.Item2))
                     {
-                        var pageMatches = Regex.Matches(pageRes.Item2, @"href=""#(\d+)""", RegexOptions.Compiled);
+                        var html = HttpUtility.HtmlDecode(pageRes.Item2);
+                        var pageMatches = Regex.Matches(html, @"href=""#(\d+)""", RegexOptions.Compiled);
                         foreach (var pageMatch in pageMatches.Select(m => m.Groups[1].Value).Distinct())
                         {
                             var pageUrl = parentUrl + pageMatch;
@@ -572,12 +583,17 @@ namespace AsyncNet
                             }
                             pages.Push(pageUrl);
                         }
-                        pageMatches = Regex.Matches(pageRes.Item2, @"href=""(/favorite/\d+/.+?)""", RegexOptions.Compiled);
+                        pageMatches = Regex.Matches(html, @"href=""(/favorite/\d+/.+?)""", RegexOptions.Compiled);
                         foreach (var pageMatch in pageMatches.Select(m => m.Groups[1].Value).Distinct())
                         {
                             pages.Push(baseHost + pageMatch);
                         }
-                        var matches = Regex.Matches(pageRes.Item2, @"href=""(/prof-video-click/.+?|/video\d+/.+?)""", RegexOptions.Compiled);
+                        pageMatches = Regex.Matches(html, @"href=""(/\?k=[^""]+?&p=\d+)""", RegexOptions.Compiled);
+                        foreach (var pageMatch in pageMatches.Select(m => m.Groups[1].Value).Distinct())
+                        {
+                            pages.Push(baseHost + pageMatch);
+                        }
+                        var matches = Regex.Matches(html, @"href=""(/prof-video-click/.+?|/video\d+/.+?)""", RegexOptions.Compiled);
                         var pageItems = matches.Where(m => m.Success)
                             .Select(m => m.Groups[1].Value)
                             .Distinct();
